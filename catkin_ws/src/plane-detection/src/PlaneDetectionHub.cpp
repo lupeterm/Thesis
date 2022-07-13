@@ -49,7 +49,9 @@
 #include <vector>
 #include <boost/foreach.hpp>
 #include <fstream>
+#include <iostream>
 #include <thread>
+#include <algorithm>
 
 // RSPD
 #include "RSPD/point.h"
@@ -61,6 +63,13 @@
 
 // OPS
 #include "OPS/Ops.h"
+
+// 3DKHT
+#include "3DKHT/octree_t.h"
+#include "3DKHT/settings.h"
+#include "3DKHT/plane_t.h"
+#include "3DKHT/hough.h"
+#include "3DKHT/accumulatorball_t.h"
 
 namespace rvt = rviz_visual_tools;
 typedef pcl::PointCloud<pcl::PointXYZRGBNormal> PCLPointCloud;
@@ -86,6 +95,8 @@ namespace rviz_visual_tools
 
     public:
         ros::Subscriber sub;
+        hough_settings settings;
+
         /**
          * \brief Constructor
          */
@@ -101,9 +112,59 @@ namespace rviz_visual_tools
             {
                 sub = nh_.subscribe(subTopic, 1000, &PlaneDetectionHub::callback_OPS, this);
             }
+            if (alg == "3dkht")
+            {
+                sub = nh_.subscribe(subTopic, 1000, &PlaneDetectionHub::callback_3DKHT, this);
+            }
             // Clear messages
             visual_tools_->deleteAllMarkers();
             visual_tools_->enableBatchPublishing();
+        }
+
+        void callback_3DKHT(const PCLPointCloud::ConstPtr &msg)
+        {
+            ROS_INFO("Received MapCloud");
+            octree_t father;
+            accumulatorball_t *accum;
+
+            father.m_middle = Vector4d(0, 0, 0);
+            father.m_level = 0;
+            father.m_root = &father;
+            std::vector<plane_t> planes_out;
+
+            double max_distance = 0.0;
+            int point_num = 0;
+            double mix, miy, miz, max, may, maz;
+
+            // add points to octree
+            BOOST_FOREACH (const pcl::PointXYZRGBNormal &pt, msg->points)
+            {
+                Vector4d point, color(160, 160, 160);
+                point.x = pt.x;
+                point.y = pt.y;
+                point.z = pt.z;
+                color.x = pt.r;
+                color.y = pt.g;
+                color.z = pt.b;
+                father.m_points.push_back(point);
+                father.m_centroid += point;
+                father.m_indexes.push_back(point_num++);
+                father.m_colors.push_back(color / 255.0);
+                mix = std::min(mix, point.x);
+                miy = std::min(miy, point.y);
+                miz = std::min(miz, point.z);
+                max = std::max(max, point.x);
+                may = std::max(may, point.y);
+                maz = std::max(maz, point.z);
+            }
+            Vector4d centroid = father.m_centroid / father.m_points.size();
+            father.m_centroid = Vector4d();
+            father.m_size = max_distance * 2.0;
+            auto t_start = std::chrono::high_resolution_clock::now();
+            accum = kht3d(planes_out, father, settings);
+            auto t_elasped = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::high_resolution_clock::now() - t_start).count() / 1000.0;
+            std::cout << "Hough Transform:                Total [" << t_elasped << "]   " << 1.0 / t_elasped << " fps\n";
+            std::cout << "3-D KHT ended: " << planes_out.size() << " planes found" << std::endl;
         }
 
         void callback_OPS(const pcl::PointCloudXYZ::Ptr &msg)
